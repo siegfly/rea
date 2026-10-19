@@ -103,45 +103,25 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       if (args[0] === race.target && race.mode === "directory_missing")
         race.opened = true;
       if (args[0] === race.target && race.mode === "cancel_directory_close") {
-        const iterator = directory[Symbol.asyncIterator]();
-        let closed = false;
-        const closeBeforeCancel = async () => {
-          if (closed) return;
-          closed = true;
-          try {
-            await directory.close();
-          } catch (cause: unknown) {
-            if (
-              !(cause instanceof Error) ||
-              !("code" in cause) ||
-              cause.code !== "ERR_DIR_CLOSED"
-            )
-              throw cause;
-          }
+        const nativeClose = directory.close.bind(directory);
+        const closed = () => {
           race.closeCompleted = true;
           race.controller?.abort(race.reason);
         };
-        const wrappedIterator = {
-          [Symbol.asyncIterator]() {
-            return this;
-          },
-          async next() {
-            const next = await iterator.next();
-            if (next.done) await closeBeforeCancel();
-            return next;
-          },
-          async return() {
-            const result = await iterator.return?.();
-            await closeBeforeCancel();
-            return result ?? { done: true, value: undefined };
-          },
-        };
-        return new Proxy(directory, {
-          get(target, property, receiver) {
-            if (property === Symbol.asyncIterator) return () => wrappedIterator;
-            return Reflect.get(target, property, receiver);
-          },
-        });
+        type Callback = (error: NodeJS.ErrnoException | null) => void;
+        function close(): Promise<void>;
+        function close(callback: Callback): void;
+        function close(callback?: Callback): void | Promise<void> {
+          if (callback !== undefined) {
+            nativeClose((error) => {
+              if (error === null) closed();
+              callback(error);
+            });
+            return;
+          }
+          return nativeClose().then(closed);
+        }
+        directory.close = close;
       }
       // The selected directory's next lstat is snapshotRoots' post-enumeration
       // identity check. The deletion itself happens in that lstat wrapper.
@@ -152,7 +132,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 import { parseProcessScenario } from "../../src/domain/process/processScenario.js";
 import { classifyFilesystemEffects } from "../../src/process/capture/ProcessFilesystemEffects.js";
-import { snapshotRoots } from "../../src/process/capture/FilesystemSnapshot.js";
+import {
+  ProcessCaptureSnapshotFailure,
+  snapshotRoots,
+} from "../../src/process/capture/FilesystemSnapshot.js";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 
 const resetRace = () => {
@@ -163,6 +146,20 @@ const resetRace = () => {
   race.closeCompleted = false;
   race.controller = undefined;
   race.reason = undefined;
+};
+
+const expectCancelledSnapshot = async (
+  pending: ReturnType<typeof snapshotRoots>,
+  reason: unknown,
+) => {
+  const failure = await pending.catch((cause: unknown) => cause);
+  expect(failure).toBeInstanceOf(ProcessCaptureSnapshotFailure);
+  if (!(failure instanceof ProcessCaptureSnapshotFailure))
+    throw new Error("Expected a typed snapshot failure");
+  expect(failure.userCategory).toBe("cancelled");
+  expect(failure.cause).toBe(reason);
+  expect(failure.snapshot).toBeDefined();
+  expect(failure.cleanupIncomplete).toBe(false);
 };
 
 afterEach(resetRace);
@@ -335,7 +332,8 @@ it.skipIf(process.platform === "win32")(
       race.target = link;
       race.controller = controller;
       race.reason = reason;
-      await expect(snapshotRoots(scenario, controller.signal)).rejects.toBe(
+      await expectCancelledSnapshot(
+        snapshotRoots(scenario, controller.signal),
         reason,
       );
     }),
@@ -358,7 +356,8 @@ it.skipIf(process.platform === "win32")(
       race.target = link;
       race.controller = controller;
       race.reason = reason;
-      await expect(snapshotRoots(scenario, controller.signal)).rejects.toBe(
+      await expectCancelledSnapshot(
+        snapshotRoots(scenario, controller.signal),
         reason,
       );
     }),
@@ -380,7 +379,8 @@ it("observes cancellation after the selected directory iterator closes", async (
     race.target = directory;
     race.controller = controller;
     race.reason = reason;
-    await expect(snapshotRoots(scenario, controller.signal)).rejects.toBe(
+    await expectCancelledSnapshot(
+      snapshotRoots(scenario, controller.signal),
       reason,
     );
     expect(race.closeCompleted).toBe(true);
@@ -427,7 +427,10 @@ it.skipIf(process.platform === "win32")(
       race.mode = "readlink_eio";
       race.target = link;
       await expect(snapshotRoots(scenario)).rejects.toMatchObject({
-        code: "EIO",
+        cause: { code: "EIO" },
+        userCategory: undefined,
+        cleanupIncomplete: false,
+        snapshot: { truncated: true },
       });
     }),
 );
