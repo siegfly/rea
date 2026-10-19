@@ -1,6 +1,9 @@
 import { expect, it } from "vitest";
 
-import { snapshotRoots } from "./FilesystemSnapshot.js";
+import {
+  ProcessCaptureSnapshotFailure,
+  snapshotRoots,
+} from "./FilesystemSnapshot.js";
 import { buildCaptureResult } from "./ProcessCaptureLifecycle.js";
 import { isInitializedPtyRoot, readLinuxChildren } from "./ProcessSampling.js";
 import { TerminalRenderer } from "./TerminalRenderer.js";
@@ -267,13 +270,26 @@ it("admits PTY samples only after stable session and token setup", () => {
 it("cancels filesystem snapshots before traversing declared roots", async () => {
   const controller = new AbortController();
   controller.abort();
-  await expect(
-    snapshotRoots(
-      parseProcessScenario({
-        ...base,
-        filesystem_observation_paths: ["/tmp"],
-      }),
-      controller.signal,
-    ),
-  ).rejects.toMatchObject({ name: "AbortError" });
+  const outcome = await snapshotRoots(
+    parseProcessScenario({
+      ...base,
+      filesystem_observation_paths: ["/tmp"],
+    }),
+    controller.signal,
+  ).catch((cause: unknown) => cause);
+  expect(outcome).toBeInstanceOf(ProcessCaptureSnapshotFailure);
+  if (!(outcome instanceof ProcessCaptureSnapshotFailure))
+    throw new Error("expected a cancelled filesystem snapshot");
+  expect(outcome.cause).toBe(controller.signal.reason);
+  expect(outcome.userCategory).toBe("cancelled");
+  expect(outcome.reason).toBe("cancelled");
+  expect(outcome.cleanupIncomplete).toBe(false);
+  expect(outcome.cleanupLeases).toEqual([]);
+  expect(outcome.readFailures).toEqual([]);
+  expect(outcome.snapshot).toMatchObject({
+    files: [],
+    completeRoots: [],
+    truncated: true,
+    coverage: { hashed_bytes: 0 },
+  });
 });
