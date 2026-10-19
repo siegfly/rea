@@ -116,12 +116,14 @@ const expectWorkflowQuestionsRetained = (
   expect(result.residual_unknowns.length).toBeGreaterThan(0);
   expect(snapshot.evidence_bundle.unknowns).toEqual(
     expect.arrayContaining(
-      result.residual_unknowns.map((question) =>
-        expect.objectContaining({
-          question,
+      result.residual_unknowns.map((question: unknown) => {
+        if (typeof question !== "string")
+          throw new Error("Fixture residual question must be a string");
+        return expect.objectContaining({
+          question: `${question} (Evidence ${evidence.evidence_id})`,
           supporting_evidence_ids: [evidence.evidence_id],
-        }),
-      ),
+        });
+      }),
     ),
   );
 };

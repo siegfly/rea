@@ -283,7 +283,7 @@ itWithCaptureCapability(
 );
 
 itWithCaptureCapability(
-  "reports unknown resource cleanup when temporary-root preparation fails",
+  "reports no resource cleanup required when temporary-root preparation fails before acquisition",
   async () => {
     const scenario = await writeScenario(
       "rea-process-progress-prepare-failed-",
@@ -306,14 +306,21 @@ itWithCaptureCapability(
     });
 
     expect(capture.exitCode).toBe(1);
+    const failure = analysisCliErrorEnvelopeSchema.parse(
+      JSON.parse(capture.stdout),
+    );
+    expect(JSON.stringify(failure)).toContain(missingTempRoot);
+    expect(capture.lines.map(({ update }) => update.phase)).not.toContain(
+      "running",
+    );
     expect(capture.lines.at(-1)?.update).toMatchObject({
       phase: "cleanup",
       terminal: true,
       details: {
         disposition: "failed",
-        owned_process_group: "unverified",
-        terminal_renderer: "unverified",
-        temporary_root: "unverified",
+        owned_process_group: "not_required",
+        terminal_renderer: "not_required",
+        temporary_root: "not_required",
       },
     });
   },
