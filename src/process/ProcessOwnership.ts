@@ -1289,18 +1289,14 @@ const scanWithOwnershipEvidence = async (
     observationRows,
     host,
   );
-  const baselineIdentityFailures: ProcessOwnershipValidationFailure[] = [];
+  const unresolvedBaselinePids = new Set<number>();
   const candidates = observationRows.filter((process) => {
     if (retainedPids.has(process.pid)) return true;
     if (!baseline.has(process.pid)) return true;
     const before = baseline.get(process.pid);
     const now = firstIdentities.get(process.pid);
     if (before === null || now?.state !== "readable") {
-      baselineIdentityFailures.push({
-        pid: process.pid,
-        reason: "process-identity-unavailable",
-        diagnostic: "process identity was unavailable during token validation",
-      });
+      unresolvedBaselinePids.add(process.pid);
       // Keep the row in the owning fact pass. The failure is not evidence that
       // the process is absent, and a related unknown generation must survive
       // a later process-table omission.
@@ -1320,19 +1316,18 @@ const scanWithOwnershipEvidence = async (
     },
   );
   let facts = initialFacts;
+  const needsTokenRetry = (fact: ProcessOwnershipFact): boolean =>
+    fact.token.state === "unavailable" && fact.identityAfter.state !== "absent";
   for (
     let attempt = 0;
-    attempt < TOKEN_READ_RETRY_ATTEMPTS &&
-    facts.some(({ token }) => token.state === "unavailable");
+    attempt < TOKEN_READ_RETRY_ATTEMPTS && facts.some(needsTokenRetry);
     attempt += 1
   ) {
     await new Promise<void>((resolve) =>
       setTimeout(resolve, TOKEN_READ_RETRY_DELAY_MS),
     );
     const pendingPids = new Set(
-      facts
-        .filter(({ token }) => token.state === "unavailable")
-        .map(({ process }) => process.pid),
+      facts.filter(needsTokenRetry).map(({ process }) => process.pid),
     );
     const retryRows = candidates.filter(({ pid }) => pendingPids.has(pid));
     const retries = await readProcessOwnershipFacts(retryRows, host);
@@ -1356,24 +1351,29 @@ const scanWithOwnershipEvidence = async (
   const retainedByPid = new Map(
     retained.map((candidate) => [candidate.pid, candidate]),
   );
-  const failures: ProcessOwnershipValidationFailure[] = [
-    ...baselineIdentityFailures,
-  ];
+  const failures: ProcessOwnershipValidationFailure[] = [];
   const unverified: OwnershipSweepUnverifiedProcess[] = [];
   const owned: ProcessTableEntry[] = [];
   const identities = new Map<number, string | null>();
 
   for (const fact of facts) {
+    // A stale baseline/table row is not a live resource. Settle uncertainty
+    // from the completed native observation, never from a table omission or
+    // an unreadable environment. Live/unknown generations still fail closed.
+    if (fact.identityAfter.state === "absent") continue;
+    if (unresolvedBaselinePids.has(fact.process.pid))
+      failures.push({
+        pid: fact.process.pid,
+        reason: "process-identity-unavailable",
+        diagnostic: "process identity was unavailable during token validation",
+      });
     if (fact.state === "replaced")
       failures.push({
         pid: fact.process.pid,
         reason: "process-identity-unavailable",
         diagnostic: "process identity changed during token validation",
       });
-    else if (
-      fact.state === "unavailable" &&
-      fact.identityAfter.state !== "absent"
-    )
+    else if (fact.state === "unavailable")
       failures.push({
         pid: fact.process.pid,
         reason: "process-identity-unavailable",
@@ -1392,7 +1392,6 @@ const scanWithOwnershipEvidence = async (
         reason: "run-token-mismatch",
       });
     if (fact.token.state !== "unavailable") continue;
-    if (fact.identityAfter.state === "absent") continue;
     const relationBefore =
       fact.identityBefore.state === "readable"
         ? fact.identityBefore.relation

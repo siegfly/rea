@@ -10,6 +10,67 @@ import { ProcessOwnershipEvidenceOwner } from "./ProcessOwnershipEvidence.js";
 
 const itOnLinux = process.platform === "linux" ? it : it.skip;
 
+it.each(["linux", "darwin"] as const)(
+  "settles a stale baseline row using native absence on %s",
+  async (platform) => {
+    const row: ProcessTableEntry = {
+      pid: 101,
+      parentPid: 100,
+      processGroupId: 100,
+      state: "S",
+      command: "exited baseline process",
+    };
+    const signalGroup = vi.fn();
+    const runTokens = vi.fn(
+      async (entries: readonly ProcessTableEntry[]) =>
+        new Map(
+          entries.map(({ pid }) => [
+            pid,
+            { state: "unavailable" as const, reason: "process exited" },
+          ]),
+        ),
+    );
+    const host: ProcessOwnershipHost = {
+      platform,
+      listProcesses: async () => [row],
+      environment: async () => ({}),
+      runTokens,
+      processIdentities: async (entries) =>
+        new Map(
+          entries.map(({ pid }) => [
+            pid,
+            {
+              state: "absent" as const,
+              reason:
+                platform === "linux"
+                  ? ("not-found-in-caller-pid-namespace" as const)
+                  : ("not-in-snapshot" as const),
+            },
+          ]),
+        ),
+      signalGroup,
+    };
+    for (const identity of ["baseline-generation", null]) {
+      await expect(
+        verifyNoTokenOwnedProcesses(
+          "run-token",
+          host,
+          [{ pid: row.pid, identity }],
+          {
+            leaderPid: 100,
+            processGroupId: 100,
+            evidenceOwner: new ProcessOwnershipEvidenceOwner(),
+          },
+        ),
+      ).resolves.toMatchObject({ cleaned: true });
+    }
+    // Native absence completes the observation without waiting on a retry
+    // clock for a process whose environment can no longer become readable.
+    expect(runTokens).toHaveBeenCalledTimes(2);
+    expect(signalGroup).not.toHaveBeenCalled();
+  },
+);
+
 const observedIdentity = (entry: ProcessTableEntry, identity: string) => ({
   state: "readable" as const,
   identity,
